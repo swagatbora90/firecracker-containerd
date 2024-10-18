@@ -926,10 +926,27 @@ vdf  254:80   0        512B  0 |  214 244 216 245 215 177 177 177`
 }
 
 func startAndWaitTask(ctx context.Context, t testing.TB, c containerd.Container) string {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	stdoutR, stdoutW := io.Pipe()
+	stderrR, stderrW := io.Pipe()
 
-	task, err := c.NewTask(ctx, cio.NewCreator(cio.WithStreams(nil, &stdout, &stderr)))
+	var stdoutBuf, stderrBuf bytes.Buffer
+	var stdoutErr, stderrErr error
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, stdoutErr = io.Copy(&stdoutBuf, stdoutR)
+		stdoutR.Close()
+	}()
+
+	go func() {
+		defer wg.Done()
+		_, stderrErr = io.Copy(&stderrBuf, stderrR)
+		stderrR.Close()
+	}()
+
+	task, err := c.NewTask(ctx, cio.NewCreator(cio.WithStreams(nil, stdoutW, stderrW)))
 	require.NoError(t, err, "failed to create task for container %s", c.ID())
 
 	exitCh, err := task.Wait(ctx)
@@ -946,8 +963,12 @@ func startAndWaitTask(ctx context.Context, t testing.TB, c containerd.Container)
 		assert.NoError(t, exitStatus.Error(), "failed to retrieve exitStatus")
 		assert.Equal(t, uint32(0), exitStatus.ExitCode())
 
-		// Print stderr to help with debugging
-		stderrOutput := stderr.String()
+		wg.Wait()
+
+		require.NoError(t, stdoutErr, "error copying stdout")
+		require.NoError(t, stderrErr, "error copying stderr")
+
+		stderrOutput := stderrBuf.String()
 		if len(stderrOutput) != 0 {
 			fmt.Printf("stderr output from container %s: %s", c.ID(), stderrOutput)
 		}
@@ -962,7 +983,7 @@ func startAndWaitTask(ctx context.Context, t testing.TB, c containerd.Container)
 			"context cancelled while waiting for container %s to exit, err: %v", c.ID(), ctx.Err())
 	}
 
-	return stdout.String()
+	return stdoutBuf.String()
 }
 
 func testCreateContainerWithSameName(t *testing.T, vmID string) {
