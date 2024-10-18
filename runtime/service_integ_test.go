@@ -929,21 +929,23 @@ func startAndWaitTask(ctx context.Context, t testing.TB, c containerd.Container)
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	var stdoutErr, stderrErr error
-	var wg sync.WaitGroup
+	stdoutCh := make(chan string)
+	stderrCh := make(chan string)
 
-	wg.Add(2)
 	go func() {
-		defer wg.Done()
-		_, stdoutErr = io.Copy(&stdoutBuf, stdoutR)
-		stdoutR.Close()
+		var out bytes.Buffer
+		_, err := io.Copy(&out, stdoutR)
+		require.NoError(t, err, "failed to read stdout")
+		stdoutCh <- out.String()
+		close(stdoutCh)
 	}()
 
 	go func() {
-		defer wg.Done()
-		_, stderrErr = io.Copy(&stderrBuf, stderrR)
-		stderrR.Close()
+		var out bytes.Buffer
+		_, err := io.Copy(&out, stderrR)
+		require.NoError(t, err, "failed to read stderr")
+		stderrCh <- out.String()
+		close(stderrCh)
 	}()
 
 	task, err := c.NewTask(ctx, cio.NewCreator(cio.WithStreams(nil, stdoutW, stderrW)))
@@ -963,16 +965,6 @@ func startAndWaitTask(ctx context.Context, t testing.TB, c containerd.Container)
 		assert.NoError(t, exitStatus.Error(), "failed to retrieve exitStatus")
 		assert.Equal(t, uint32(0), exitStatus.ExitCode())
 
-		wg.Wait()
-
-		require.NoError(t, stdoutErr, "error copying stdout")
-		require.NoError(t, stderrErr, "error copying stderr")
-
-		stderrOutput := stderrBuf.String()
-		if len(stderrOutput) != 0 {
-			fmt.Printf("stderr output from container %s: %s", c.ID(), stderrOutput)
-		}
-
 		status, err := task.Delete(ctx)
 		assert.NoErrorf(t, err, "failed to delete task %q after exit", c.ID())
 		if status != nil {
@@ -983,7 +975,13 @@ func startAndWaitTask(ctx context.Context, t testing.TB, c containerd.Container)
 			"context cancelled while waiting for container %s to exit, err: %v", c.ID(), ctx.Err())
 	}
 
-	return stdoutBuf.String()
+	stdout := <-stdoutCh
+	stderr := <-stderrCh
+
+	assert.Equal(t, "", stderr, "stderr is not empty")
+	assert.NotEmpty(t, stdout, "stdout is empty")
+
+	return stdout
 }
 
 func testCreateContainerWithSameName(t *testing.T, vmID string) {
